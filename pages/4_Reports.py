@@ -282,19 +282,46 @@ elif report_type.startswith("3"):
 
 # ── 4. Margin Analysis ─────────────────────────────────────────────────────────
 elif report_type.startswith("4"):
-    st.subheader("Margin Analysis (including Shipping & Warehousing)")
+    st.subheader("Margin Analysis")
 
     margin_data = analysis_stats.margin_summary()
     sales_df = margin_data["sales"]
-    costs_df = margin_data["costs"]
-    logistics_df = margin_data["logistics"]
+    landed_df = margin_data["landed"]   # explicit landed costs (preferred)
+    costs_df = margin_data["costs"]     # distributor our_cost (fallback)
+    logistics_df = margin_data["logistics"]  # legacy split costs (fallback)
 
     if sales_df.empty:
         st.info("No sales data found.")
         st.stop()
 
+    has_landed = not landed_df.empty
+    if has_landed:
+        st.info(
+            f"Using **explicit landed costs** for {len(landed_df)} product(s). "
+            "Manage costs on the **Landed Costs** page.",
+            icon="✅",
+        )
+    else:
+        st.info(
+            "No explicit landed costs set. Margins are estimated from distributor cost + logistics. "
+            "Add landed costs on the **Landed Costs** page for more accurate margins.",
+            icon="ℹ️",
+        )
+
     # Merge to compute margins
     merged = sales_df.copy()
+
+    # 1️⃣ Merge explicit landed costs (preferred)
+    if has_landed:
+        merged = merged.merge(
+            landed_df[["product_name", "landed_cost"]],
+            on="product_name",
+            how="left",
+        )
+    else:
+        merged["landed_cost"] = None
+
+    # 2️⃣ Merge distributor cost + logistics as fallback columns
     if not costs_df.empty:
         merged = merged.merge(costs_df, on="product_name", how="left")
     else:
@@ -307,27 +334,33 @@ elif report_type.startswith("4"):
 
     merged["total_logistics"] = merged["total_logistics"].fillna(0)
     merged["avg_our_cost"] = merged["avg_our_cost"].fillna(0) if "avg_our_cost" in merged.columns else 0
-    merged["effective_cost"] = merged["avg_our_cost"] + merged["total_logistics"]
+    fallback_cost = merged["avg_our_cost"] + merged["total_logistics"]
+
+    # Effective cost = landed_cost if set, else fallback
+    merged["effective_cost"] = merged["landed_cost"].where(
+        merged["landed_cost"].notna(), fallback_cost
+    )
+    merged["cost_source"] = merged["landed_cost"].apply(
+        lambda v: "Landed Cost" if pd.notna(v) else "Est. (dist+logistics)"
+    )
     merged["gross_margin"] = (
         (merged["avg_net_price"] - merged["effective_cost"]) / merged["avg_net_price"] * 100
     ).where(merged["avg_net_price"] > 0).round(1)
 
     # Display table
     display = merged[[
-        "product_name", "customer_type", "avg_net_price", "avg_our_cost",
-        "total_logistics", "effective_cost", "gross_margin", "sale_count"
+        "product_name", "customer_type", "avg_net_price", "effective_cost",
+        "cost_source", "gross_margin", "sale_count"
     ]].rename(columns={
         "product_name": "Product",
         "customer_type": "Channel",
         "avg_net_price": "Avg Net ($)",
-        "avg_our_cost": "Avg Cost ($)",
-        "total_logistics": "Logistics ($)",
-        "effective_cost": "Total Cost ($)",
+        "effective_cost": "Cost / Unit ($)",
+        "cost_source": "Cost Source",
         "gross_margin": "Gross Margin (%)",
         "sale_count": "Sales",
     })
-    # Round numeric columns
-    for col in ["Avg Net ($)", "Avg Cost ($)", "Logistics ($)", "Total Cost ($)"]:
+    for col in ["Avg Net ($)", "Cost / Unit ($)"]:
         if col in display.columns:
             display[col] = display[col].round(2)
 

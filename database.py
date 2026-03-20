@@ -101,6 +101,16 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
     records_imported   INTEGER,
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS product_landed_costs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_name   TEXT NOT NULL,
+    sku            TEXT,
+    landed_cost    REAL NOT NULL,       -- total all-in cost per unit
+    effective_date DATE NOT NULL,
+    notes          TEXT,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -299,6 +309,68 @@ def get_dashboard_stats() -> dict:
         "competitor_count": competitor_count,
         "product_count": product_count,
     }
+
+
+# ── Landed cost helpers ────────────────────────────────────────────────────────
+
+def insert_landed_cost(data: dict) -> int:
+    cols = ", ".join(data.keys())
+    placeholders = ", ".join(["?"] * len(data))
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO product_landed_costs ({cols}) VALUES ({placeholders})",
+            list(data.values()),
+        )
+        return cur.lastrowid
+
+
+def get_current_landed_costs() -> list[dict]:
+    """Return the most recent landed cost entry per SKU/product."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT plc.*
+            FROM product_landed_costs plc
+            INNER JOIN (
+                SELECT COALESCE(sku, product_name) AS key_col,
+                       MAX(effective_date) AS max_date
+                FROM product_landed_costs
+                GROUP BY key_col
+            ) latest
+              ON COALESCE(plc.sku, plc.product_name) = latest.key_col
+             AND plc.effective_date = latest.max_date
+            ORDER BY plc.product_name
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_landed_cost_history(product_name: str) -> list[dict]:
+    """Return all landed cost entries for a product, newest first."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM product_landed_costs
+            WHERE LOWER(product_name) = LOWER(?)
+               OR LOWER(sku) = LOWER(?)
+            ORDER BY effective_date DESC, created_at DESC
+        """, (product_name, product_name)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_landed_cost_for_product(product_name: str) -> float | None:
+    """Return the most recent landed cost for a product (by name or SKU)."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT landed_cost FROM product_landed_costs
+            WHERE LOWER(product_name) = LOWER(?)
+               OR LOWER(sku) = LOWER(?)
+            ORDER BY effective_date DESC, created_at DESC
+            LIMIT 1
+        """, (product_name, product_name)).fetchone()
+    return row[0] if row else None
+
+
+def delete_landed_cost(row_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM product_landed_costs WHERE id = ?", (row_id,))
 
 
 # Initialise on import

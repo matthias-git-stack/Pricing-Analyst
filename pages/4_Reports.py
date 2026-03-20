@@ -301,15 +301,13 @@ elif report_type.startswith("4"):
         merged["avg_our_cost"] = None
 
     if not logistics_df.empty:
-        logistics_df = logistics_df.rename(columns={logistics_df.columns[2]: "total_logistics"})
         merged = merged.merge(logistics_df[["product_name", "total_logistics"]], on="product_name", how="left")
     else:
         merged["total_logistics"] = 0
 
     merged["total_logistics"] = merged["total_logistics"].fillna(0)
-    merged["effective_cost"] = (
-        merged.get("avg_our_cost", 0).fillna(0) + merged["total_logistics"]
-    )
+    merged["avg_our_cost"] = merged["avg_our_cost"].fillna(0) if "avg_our_cost" in merged.columns else 0
+    merged["effective_cost"] = merged["avg_our_cost"] + merged["total_logistics"]
     merged["gross_margin"] = (
         (merged["avg_net_price"] - merged["effective_cost"]) / merged["avg_net_price"] * 100
     ).where(merged["avg_net_price"] > 0).round(1)

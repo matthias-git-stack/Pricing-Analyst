@@ -30,6 +30,9 @@ def product_price_stats(product_name: str) -> dict:
     street_prices = [d["street_price"] for d in dist if d.get("street_price")]
     our_costs = [d["our_cost"] for d in dist if d.get("our_cost")]
 
+    # Landed cost — preferred source for margin; falls back to dist cost + logistics
+    landed_cost = db.get_landed_cost_for_product(product_name)
+
     logistics_cost = 0.0
     if logistics:
         l = logistics[0]  # most recent
@@ -45,13 +48,17 @@ def product_price_stats(product_name: str) -> dict:
     won_prices = [q["net_price"] for q in won_quotes if q.get("net_price")]
     lost_prices = [q["net_price"] for q in lost_quotes if q.get("net_price")]
 
-    # Margin calculation (vs distributor cost when available)
-    base_cost = statistics.mean(our_costs) if our_costs else None
+    # Margin calculation — prefer explicit landed_cost, fall back to dist cost + logistics
     avg_net = statistics.mean(net_prices) if net_prices else None
     margin_pct = None
-    if avg_net and base_cost and avg_net > 0:
-        effective_cost = base_cost + logistics_cost
-        margin_pct = round((avg_net - effective_cost) / avg_net * 100, 1)
+    effective_cost_used = None
+    if avg_net and avg_net > 0:
+        if landed_cost is not None:
+            effective_cost_used = landed_cost
+        elif our_costs:
+            effective_cost_used = statistics.mean(our_costs) + logistics_cost
+        if effective_cost_used is not None:
+            margin_pct = round((avg_net - effective_cost_used) / avg_net * 100, 1)
 
     return {
         "product_name": product_name,
@@ -81,10 +88,13 @@ def product_price_stats(product_name: str) -> dict:
         # Distributor
         "distributor_street_avg": round(statistics.mean(street_prices), 2) if street_prices else None,
         "our_cost_avg": round(statistics.mean(our_costs), 2) if our_costs else None,
-        # Logistics
+        # Landed cost (explicit, preferred)
+        "landed_cost": landed_cost,
+        # Logistics (legacy split)
         "logistics_cost_per_unit": logistics_cost if logistics else None,
         # Margin
         "estimated_margin_pct": margin_pct,
+        "effective_cost_used": round(effective_cost_used, 2) if effective_cost_used else None,
         # Raw lists for AI
         "raw_sales": sales,
         "raw_quotes": quotes,
@@ -173,7 +183,10 @@ def competitor_comparison_summary() -> dict:
 
 
 def margin_summary() -> dict:
-    """Calculate margin by product and channel."""
+    """Calculate margin by product and channel.
+
+    Cost preference: explicit landed_cost > distributor our_cost + logistics.
+    """
     df = db.query_df("""
         SELECT
             s.product_name,
@@ -184,6 +197,19 @@ def margin_summary() -> dict:
         FROM sales s
         WHERE s.net_price IS NOT NULL
         GROUP BY s.product_name, s.customer_type
+    """)
+    # Explicit landed costs (most-recent per product)
+    landed_df = db.query_df("""
+        SELECT plc.product_name, plc.sku, plc.landed_cost, plc.effective_date
+        FROM product_landed_costs plc
+        INNER JOIN (
+            SELECT COALESCE(sku, product_name) AS key_col,
+                   MAX(effective_date) AS max_date
+            FROM product_landed_costs
+            GROUP BY key_col
+        ) latest
+          ON COALESCE(plc.sku, plc.product_name) = latest.key_col
+         AND plc.effective_date = latest.max_date
     """)
     cost_df = db.query_df("""
         SELECT product_name,
@@ -200,7 +226,12 @@ def margin_summary() -> dict:
         FROM logistics_costs
         GROUP BY product_name
     """)
-    return {"sales": df, "costs": cost_df, "logistics": logistics_df}
+    return {
+        "sales": df,
+        "landed": landed_df,
+        "costs": cost_df,
+        "logistics": logistics_df,
+    }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

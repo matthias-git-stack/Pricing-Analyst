@@ -11,6 +11,7 @@ import os
 from typing import Generator
 
 import anthropic
+import pandas as pd
 
 _client: anthropic.Anthropic | None = None
 
@@ -107,10 +108,18 @@ Competitor Prices (by product and competitor):
 def stream_margin_analysis(margin_data: dict) -> Generator[str, None, None]:
     """Analyse margins including logistics costs."""
     sales = margin_data["sales"].to_dict(orient="records") if not margin_data["sales"].empty else []
+    landed = margin_data["landed"].to_dict(orient="records") if not margin_data.get("landed", pd.DataFrame()).empty else []
     costs = margin_data["costs"].to_dict(orient="records") if not margin_data["costs"].empty else []
     logistics = margin_data["logistics"].to_dict(orient="records") if not margin_data["logistics"].empty else []
 
-    prompt = f"""Analyse product margins including logistics and provide:
+    cost_section = (
+        f"Explicit Landed Costs per Unit (preferred, all-in):\n{json.dumps(landed, indent=2, default=str)}"
+        if landed else
+        f"Cost Basis (distributor our-cost):\n{json.dumps(costs, indent=2, default=str)}\n\n"
+        f"Logistics Costs per Unit:\n{json.dumps(logistics, indent=2, default=str)}"
+    )
+
+    prompt = f"""Analyse product margins and provide:
 
 1. **Margin Summary** — effective margin per product/channel after all costs.
 2. **Margin Erosion** — products or segments with declining or negative margin.
@@ -120,11 +129,7 @@ def stream_margin_analysis(margin_data: dict) -> Generator[str, None, None]:
 Sales (avg net price by product + customer type):
 {json.dumps(sales, indent=2, default=str)}
 
-Cost Basis (distributor our-cost):
-{json.dumps(costs, indent=2, default=str)}
-
-Logistics Costs per Unit:
-{json.dumps(logistics, indent=2, default=str)}"""
+{cost_section}"""
 
     yield from _stream(prompt)
 
@@ -219,8 +224,12 @@ def _build_product_summary(stats: dict) -> str:
         lines.append(f"Distributor street price avg: ${stats['distributor_street_avg']}")
     if stats.get("our_cost_avg"):
         lines.append(f"Our distributor cost avg: ${stats['our_cost_avg']}")
-    if stats.get("logistics_cost_per_unit") is not None:
+    if stats.get("landed_cost") is not None:
+        lines.append(f"Landed cost per unit (explicit): ${stats['landed_cost']:.4f}")
+    elif stats.get("logistics_cost_per_unit") is not None:
         lines.append(f"Logistics cost per unit: ${stats['logistics_cost_per_unit']:.2f}")
+    if stats.get("effective_cost_used") is not None:
+        lines.append(f"Effective cost used for margin: ${stats['effective_cost_used']:.2f}")
     if stats.get("estimated_margin_pct") is not None:
         lines.append(f"Estimated margin: {stats['estimated_margin_pct']}%")
 
